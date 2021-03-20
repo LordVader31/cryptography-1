@@ -6,6 +6,7 @@
 import abc
 import inspect
 import sys
+import typing
 import warnings
 
 
@@ -23,42 +24,32 @@ PersistentlyDeprecated2019 = CryptographyDeprecationWarning
 DeprecatedIn34 = CryptographyDeprecationWarning
 
 
-def _check_bytes(name, value):
+def _check_bytes(name: str, value: bytes) -> None:
     if not isinstance(value, bytes):
         raise TypeError("{} must be bytes".format(name))
 
 
-def _check_byteslike(name, value):
+def _check_byteslike(name: str, value: bytes) -> None:
     try:
         memoryview(value)
     except TypeError:
         raise TypeError("{} must be bytes-like".format(name))
 
 
-def read_only_property(name):
+def read_only_property(name: str):
     return property(lambda self: getattr(self, name))
 
 
 def register_interface(iface):
-    def register_decorator(klass):
-        verify_interface(iface, klass)
+    def register_decorator(klass, *, check_annotations=False):
+        verify_interface(iface, klass, check_annotations=check_annotations)
         iface.register(klass)
         return klass
 
     return register_decorator
 
 
-def register_interface_if(predicate, iface):
-    def register_decorator(klass):
-        if predicate:
-            verify_interface(iface, klass)
-            iface.register(klass)
-        return klass
-
-    return register_decorator
-
-
-def int_to_bytes(integer, length=None):
+def int_to_bytes(integer: int, length: typing.Optional[int] = None) -> bytes:
     return integer.to_bytes(
         length or (integer.bit_length() + 7) // 8 or 1, "big"
     )
@@ -68,7 +59,16 @@ class InterfaceNotImplemented(Exception):
     pass
 
 
-def verify_interface(iface, klass):
+def strip_annotation(signature):
+    return inspect.Signature(
+        [
+            param.replace(annotation=inspect.Parameter.empty)
+            for param in signature.parameters.values()
+        ]
+    )
+
+
+def verify_interface(iface, klass, *, check_annotations=False):
     for method in iface.__abstractmethods__:
         if not hasattr(klass, method):
             raise InterfaceNotImplemented(
@@ -79,7 +79,11 @@ def verify_interface(iface, klass):
             continue
         sig = inspect.signature(getattr(iface, method))
         actual = inspect.signature(getattr(klass, method))
-        if sig != actual:
+        if check_annotations:
+            ok = sig == actual
+        else:
+            ok = strip_annotation(sig) == strip_annotation(actual)
+        if not ok:
             raise InterfaceNotImplemented(
                 "{}.{}'s signature differs from the expected. Expected: "
                 "{!r}. Received: {!r}".format(klass, method, sig, actual)
@@ -121,7 +125,9 @@ class _ModuleWithDeprecations(object):
 def deprecated(value, module_name, message, warning_class):
     module = sys.modules[module_name]
     if not isinstance(module, _ModuleWithDeprecations):
-        sys.modules[module_name] = _ModuleWithDeprecations(module)
+        sys.modules[module_name] = _ModuleWithDeprecations(
+            module
+        )  # type: ignore[assignment]
     return _DeprecatedValue(value, message, warning_class)
 
 

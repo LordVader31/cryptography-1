@@ -3,7 +3,7 @@ on:
   pull_request: {}
   push:
     branches:
-      - master
+      - main
       - '*.*.x'
     tags:
       - '*.*'
@@ -15,16 +15,17 @@ jobs:
     strategy:
       matrix:
         PYTHON:
-          - {VERSION: "3.9", TOXENV: "pep8,rust,packaging,docs", COVERAGE: "false"}
-          - {VERSION: "pypy3", TOXENV: "pypy3"}
+          - {VERSION: "3.9", TOXENV: "flake,rust,docs", COVERAGE: "false"}
+          - {VERSION: "pypy-3.6", TOXENV: "pypy3"}
+          - {VERSION: "pypy-3.7", TOXENV: "pypy3"}
           - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "openssl", VERSION: "1.1.0l"}}
-          - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "openssl", VERSION: "1.1.1i"}}
-          - {VERSION: "3.9", TOXENV: "py39-ssh", OPENSSL: {TYPE: "openssl", VERSION: "1.1.1i"}}
-          - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "openssl", VERSION: "1.1.1i", CONFIG_FLAGS: "no-engine no-rc2 no-srtp no-ct"}}
+          - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "openssl", VERSION: "1.1.1j"}}
+          - {VERSION: "3.9", TOXENV: "py39-ssh", OPENSSL: {TYPE: "openssl", VERSION: "1.1.1j"}}
+          - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "openssl", VERSION: "1.1.1j", CONFIG_FLAGS: "no-engine no-rc2 no-srtp no-ct"}}
           - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "libressl", VERSION: "2.9.2"}}
           - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "libressl", VERSION: "3.0.2"}}
           - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "libressl", VERSION: "3.1.5"}}
-          - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "libressl", VERSION: "3.2.3"}}
+          - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "libressl", VERSION: "3.2.4"}}
           - {VERSION: "3.9", TOXENV: "py39", OPENSSL: {TYPE: "libressl", VERSION: "3.3.1"}}
         RUST:
           - stable
@@ -32,6 +33,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v2
+      - uses: actions/cache@v2.1.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/rust/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Setup python
         uses: actions/setup-python@v2.2.1
         with:
@@ -57,7 +66,7 @@ jobs:
           CONFIG_FLAGS: ${{ matrix.PYTHON.OPENSSL.CONFIG_FLAGS }}
         if: matrix.PYTHON.OPENSSL
       - name: Load cache
-        uses: actions/cache@v2
+        uses: actions/cache@v2.1.4
         id: ossl-cache
         with:
           path: ${{ github.workspace }}/osslcache
@@ -107,6 +116,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v2
+      - uses: actions/cache@v2.1.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/rust/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - run: 'git clone --depth=1 https://github.com/google/wycheproof "$HOME/wycheproof"'
       - run: |
           echo "OPENSSL_FORCE_FIPS_MODE=1" >> $GITHUB_ENV
@@ -127,7 +144,8 @@ jobs:
         PYTHON:
           - {VERSION: "3.9", TOXENV: "py39"}
         RUST:
-          # Cover MSRV and in-dev versions
+          # Cover MSRV (and likely next MSRV) and in-dev versions
+          - 1.41.0
           - 1.45.0
           - beta
           - nightly
@@ -135,6 +153,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v2
+      - uses: actions/cache@v2.1.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/rust/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.RUST }}
+
       - name: Setup python
         uses: actions/setup-python@v2.2.1
         with:
@@ -169,6 +195,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v2
+      - uses: actions/cache@v2.1.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/rust/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Setup python
         uses: actions/setup-python@v2.2.1
         with:
@@ -220,6 +254,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v2
+      - uses: actions/cache@v2.1.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/rust/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Setup python
         uses: actions/setup-python@v2.2.1
         with:
@@ -273,6 +315,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v2
+      - uses: actions/cache@v2.1.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/rust/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Setup python
         uses: actions/setup-python@v2.2.1
         with:
@@ -290,7 +340,7 @@ jobs:
       - run: ./.github/downstream.d/${{ matrix.DOWNSTREAM }}.sh run
 
   docs-linkcheck:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     name: "linkcheck"
     timeout-minutes: 30
