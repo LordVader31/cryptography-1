@@ -12,14 +12,6 @@ from contextlib import contextmanager
 
 from cryptography import utils, x509
 from cryptography.exceptions import UnsupportedAlgorithm, _Reasons
-from cryptography.hazmat._der import (
-    INTEGER,
-    NULL,
-    SEQUENCE,
-    encode_der,
-    encode_der_integer,
-)
-from cryptography.hazmat._types import _PRIVATE_KEY_TYPES
 from cryptography.hazmat.backends.interfaces import Backend as BackendInterface
 from cryptography.hazmat.backends.openssl import aead
 from cryptography.hazmat.backends.openssl.ciphers import _CipherContext
@@ -30,7 +22,6 @@ from cryptography.hazmat.backends.openssl.decode_asn1 import (
     _EXTENSION_HANDLERS_BASE,
     _EXTENSION_HANDLERS_SCT,
     _OCSP_BASICRESP_EXTENSION_HANDLERS,
-    _OCSP_REQ_EXTENSION_HANDLERS,
     _OCSP_SINGLERESP_EXTENSION_HANDLERS_SCT,
     _REVOKED_EXTENSION_HANDLERS,
     _X509ExtensionParser,
@@ -98,6 +89,7 @@ from cryptography.hazmat.backends.openssl.x509 import (
     _CertificateSigningRequest,
     _RevokedCertificate,
 )
+from cryptography.hazmat.bindings._rust import asn1
 from cryptography.hazmat.bindings.openssl import binding
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import (
@@ -114,6 +106,7 @@ from cryptography.hazmat.primitives.asymmetric.padding import (
     PKCS1v15,
     PSS,
 )
+from cryptography.hazmat.primitives.asymmetric.types import PRIVATE_KEY_TYPES
 from cryptography.hazmat.primitives.ciphers.algorithms import (
     AES,
     ARC4,
@@ -432,7 +425,7 @@ class Backend(BackendInterface):
             self,
             ext_count=self._lib.OCSP_REQUEST_get_ext_count,
             get_ext=self._lib.OCSP_REQUEST_get_ext,
-            handlers=_OCSP_REQ_EXTENSION_HANDLERS,
+            rust_callback=asn1.parse_ocsp_req_extension,
         )
         self._ocsp_basicresp_ext_parser = _X509ExtensionParser(
             self,
@@ -901,7 +894,7 @@ class Backend(BackendInterface):
     def create_x509_csr(
         self,
         builder: x509.CertificateSigningRequestBuilder,
-        private_key: _PRIVATE_KEY_TYPES,
+        private_key: PRIVATE_KEY_TYPES,
         algorithm: typing.Optional[hashes.HashAlgorithm],
     ) -> _CertificateSigningRequest:
         if not isinstance(builder, x509.CertificateSigningRequestBuilder):
@@ -982,7 +975,7 @@ class Backend(BackendInterface):
     def create_x509_certificate(
         self,
         builder: x509.CertificateBuilder,
-        private_key: _PRIVATE_KEY_TYPES,
+        private_key: PRIVATE_KEY_TYPES,
         algorithm: typing.Optional[hashes.HashAlgorithm],
     ) -> _Certificate:
         if not isinstance(builder, x509.CertificateBuilder):
@@ -1084,7 +1077,7 @@ class Backend(BackendInterface):
     def create_x509_crl(
         self,
         builder: x509.CertificateRevocationListBuilder,
-        private_key: _PRIVATE_KEY_TYPES,
+        private_key: PRIVATE_KEY_TYPES,
         algorithm: typing.Optional[hashes.HashAlgorithm],
     ) -> _CertificateRevocationList:
         if not isinstance(builder, x509.CertificateRevocationListBuilder):
@@ -1171,17 +1164,14 @@ class Backend(BackendInterface):
             value = _encode_asn1_str_gc(self, extension.value.value)
             return self._create_raw_x509_extension(extension, value)
         elif isinstance(extension.value, x509.TLSFeature):
-            asn1 = encode_der(
-                SEQUENCE,
-                *[
-                    encode_der(INTEGER, encode_der_integer(x.value))
-                    for x in extension.value
-                ],
+            value = _encode_asn1_str_gc(
+                self, asn1.encode_tls_feature(extension.value)
             )
-            value = _encode_asn1_str_gc(self, asn1)
             return self._create_raw_x509_extension(extension, value)
         elif isinstance(extension.value, x509.PrecertPoison):
-            value = _encode_asn1_str_gc(self, encode_der(NULL))
+            value = _encode_asn1_str_gc(
+                self, asn1.encode_precert_poison(extension.value)
+            )
             return self._create_raw_x509_extension(extension, value)
         else:
             try:
@@ -1294,6 +1284,11 @@ class Backend(BackendInterface):
     def _evp_pkey_from_der_traditional_key(self, bio_data, password):
         key = self._lib.d2i_PrivateKey_bio(bio_data.bio, self._ffi.NULL)
         if key != self._ffi.NULL:
+            # In OpenSSL 3.0.0-alpha15 there exist scenarios where the key will
+            # successfully load but errors are still put on the stack. Tracked
+            # as https://github.com/openssl/openssl/issues/14996
+            self._consume_errors()
+
             key = self._ffi.gc(key, self._lib.EVP_PKEY_free)
             if password is not None:
                 raise TypeError(
@@ -1461,6 +1456,11 @@ class Backend(BackendInterface):
             else:
                 self._handle_key_loading_error()
 
+        # In OpenSSL 3.0.0-alpha15 there exist scenarios where the key will
+        # successfully load but errors are still put on the stack. Tracked
+        # as https://github.com/openssl/openssl/issues/14996
+        self._consume_errors()
+
         evp_pkey = self._ffi.gc(evp_pkey, self._lib.EVP_PKEY_free)
 
         if password is not None and userdata.called == 0:
@@ -1483,11 +1483,22 @@ class Backend(BackendInterface):
                 "incorrect format or it may be encrypted with an unsupported "
                 "algorithm."
             )
-        elif errors[0]._lib_reason_match(
-            self._lib.ERR_LIB_EVP, self._lib.EVP_R_BAD_DECRYPT
-        ) or errors[0]._lib_reason_match(
-            self._lib.ERR_LIB_PKCS12,
-            self._lib.PKCS12_R_PKCS12_CIPHERFINAL_ERROR,
+
+        elif (
+            errors[0]._lib_reason_match(
+                self._lib.ERR_LIB_EVP, self._lib.EVP_R_BAD_DECRYPT
+            )
+            or errors[0]._lib_reason_match(
+                self._lib.ERR_LIB_PKCS12,
+                self._lib.PKCS12_R_PKCS12_CIPHERFINAL_ERROR,
+            )
+            or (
+                self._lib.Cryptography_HAS_PROVIDERS
+                and errors[0]._lib_reason_match(
+                    self._lib.ERR_LIB_PROV,
+                    self._lib.PROV_R_BAD_DECRYPT,
+                )
+            )
         ):
             raise ValueError("Bad decrypt. Incorrect password?")
 
@@ -2533,9 +2544,16 @@ class Backend(BackendInterface):
         if sk_x509_ptr[0] != self._ffi.NULL:
             sk_x509 = self._ffi.gc(sk_x509_ptr[0], self._lib.sk_X509_free)
             num = self._lib.sk_X509_num(sk_x509_ptr[0])
+
             # In OpenSSL < 3.0.0 PKCS12 parsing reverses the order of the
             # certificates.
-            for i in reversed(range(num)):
+            indices: typing.Iterable[int]
+            if self._lib.CRYPTOGRAPHY_OPENSSL_300_OR_GREATER:
+                indices = range(num)
+            else:
+                indices = reversed(range(num))
+
+            for i in indices:
                 x509 = self._lib.sk_X509_value(sk_x509, i)
                 self.openssl_assert(x509 != self._ffi.NULL)
                 x509 = self._ffi.gc(x509, self._lib.X509_free)

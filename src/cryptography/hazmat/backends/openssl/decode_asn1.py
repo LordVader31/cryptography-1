@@ -8,8 +8,7 @@ import ipaddress
 import typing
 
 from cryptography import x509
-from cryptography.hazmat._der import DERReader, INTEGER, NULL, SEQUENCE
-from cryptography.x509.extensions import _TLS_FEATURE_TYPE_TO_ENUM
+from cryptography.hazmat.bindings._rust import asn1
 from cryptography.x509.name import _ASN1_TYPE_TO_ENUM
 from cryptography.x509.oid import (
     CRLEntryExtensionOID,
@@ -179,10 +178,14 @@ def _decode_delta_crl_indicator(backend, ext):
 
 
 class _X509ExtensionParser(object):
-    def __init__(self, backend, ext_count, get_ext, handlers):
+    def __init__(
+        self, backend, ext_count, get_ext, handlers=None, rust_callback=None
+    ):
+        assert handlers or rust_callback
         self.ext_count = ext_count
         self.get_ext = get_ext
         self.handlers = handlers
+        self.rust_callback = rust_callback
         self._backend = backend
 
     def parse(self, x509_obj):
@@ -204,6 +207,19 @@ class _X509ExtensionParser(object):
                     "Duplicate {} extension found".format(oid), oid
                 )
 
+            if self.rust_callback is not None:
+                oid_ptr = self._backend._lib.X509_EXTENSION_get_object(ext)
+                oid_der_bytes = self._backend._ffi.buffer(
+                    self._backend._lib.Cryptography_OBJ_get0_data(oid_ptr),
+                    self._backend._lib.Cryptography_OBJ_length(oid_ptr),
+                )[:]
+                data = self._backend._lib.X509_EXTENSION_get_data(ext)
+                data_bytes = _asn1_string_to_bytes(self._backend, data)
+                ext = self.rust_callback(oid_der_bytes, data_bytes)
+                extensions.append(x509.Extension(oid, critical, ext))
+                seen_oids.add(oid)
+                continue
+
             # These OIDs are only supported in OpenSSL 1.1.0+ but we want
             # to support them in all versions of OpenSSL so we decode them
             # ourselves.
@@ -211,24 +227,18 @@ class _X509ExtensionParser(object):
                 # The extension contents are a SEQUENCE OF INTEGERs.
                 data = self._backend._lib.X509_EXTENSION_get_data(ext)
                 data_bytes = _asn1_string_to_bytes(self._backend, data)
-                features = DERReader(data_bytes).read_single_element(SEQUENCE)
-                parsed = []
-                while not features.is_empty():
-                    parsed.append(features.read_element(INTEGER).as_integer())
-                # Map the features to their enum value.
-                value = x509.TLSFeature(
-                    [_TLS_FEATURE_TYPE_TO_ENUM[x] for x in parsed]
-                )
-                extensions.append(x509.Extension(oid, critical, value))
+                tls_feature = asn1.parse_tls_feature(data_bytes)
+
+                extensions.append(x509.Extension(oid, critical, tls_feature))
                 seen_oids.add(oid)
                 continue
             elif oid == ExtensionOID.PRECERT_POISON:
                 data = self._backend._lib.X509_EXTENSION_get_data(ext)
-                # The contents of the extension must be an ASN.1 NULL.
-                reader = DERReader(_asn1_string_to_bytes(self._backend, data))
-                reader.read_single_element(NULL).check_empty()
+                data_bytes = _asn1_string_to_bytes(self._backend, data)
+                precert_poison = asn1.parse_precert_poison(data_bytes)
+
                 extensions.append(
-                    x509.Extension(oid, critical, x509.PrecertPoison())
+                    x509.Extension(oid, critical, precert_poison)
                 )
                 seen_oids.add(oid)
                 continue
@@ -859,10 +869,6 @@ _CRL_EXTENSION_HANDLERS = {
     ),
     ExtensionOID.ISSUING_DISTRIBUTION_POINT: _decode_issuing_dist_point,
     ExtensionOID.FRESHEST_CRL: _decode_freshest_crl,
-}
-
-_OCSP_REQ_EXTENSION_HANDLERS = {
-    OCSPExtensionOID.NONCE: _decode_nonce,
 }
 
 _OCSP_BASICRESP_EXTENSION_HANDLERS = {

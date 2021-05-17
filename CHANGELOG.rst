@@ -8,11 +8,26 @@ Changelog
 
  .. note:: This version is not yet released and is under active development.
 
+* Changed the :ref:`version scheme <api-stability:versioning>`. This will
+  result in us incrementing the major version more frequently, but does not
+  change our existing backwards compatibility policy.
 * Added support for
   :class:`~cryptography.hazmat.primitives.hashes.SM3` and
   :class:`~cryptography.hazmat.primitives.ciphers.algorithms.SM4`,
   when using OpenSSL 1.1.1. These algorithms are provided for compatibility
   in regions where they may be required, and are not generally recommended.
+* We now ship ``manylinux_2_24`` wheels, in addition to our ``manylinux2010``
+  and ``manylinux2014`` wheels.
+* Added ``rfc4514_attribute_name`` attribute to
+  :attr:`x509.NameAttribute <cryptography.x509.NameAttribute.rfc4514_attribute_name>`,
+
+.. _v3-4-7:
+
+3.4.7 - 2021-03-25
+~~~~~~~~~~~~~~~~~~
+
+* Updated Windows, macOS, and ``manylinux`` wheels to be compiled with
+  OpenSSL 1.1.1k.
 
 .. _v3-4-6:
 

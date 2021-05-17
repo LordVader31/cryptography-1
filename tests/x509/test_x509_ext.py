@@ -1556,6 +1556,17 @@ class TestSubjectKeyIdentifierExtension(object):
         with pytest.raises(ValueError):
             _key_identifier_from_public_key(pretend_key)
 
+        # The previous value is invalid for 2 reasons: a) it's got non-zero
+        # padding bits (i.e. the first byte of the value is not zero), b) the
+        # padding bits aren't all set to zero (i.e. the last bits of the value)
+        # Here we swap the last byte out with zeros so we can hit both error
+        # checks.
+        pretend_key = pretend.stub(
+            public_bytes=lambda x, y: data[:-1] + b"\x00"
+        )
+        with pytest.raises(ValueError, match="Invalid public key encoding"):
+            _key_identifier_from_public_key(pretend_key)
+
     def test_no_optional_params_allowed_from_public_key(self, backend):
         data = load_vectors_from_file(
             filename=os.path.join(
@@ -2506,7 +2517,7 @@ class TestRSASubjectAlternativeNameExtension(object):
             SubjectAlternativeName(list(map(DNSName, sans))), True
         )
 
-        cert = builder.sign(private_key, hashes.SHA1(), backend)
+        cert = builder.sign(private_key, hashes.SHA256(), backend)
         result = [
             x.value
             for x in cert.extensions.get_extension_for_class(
@@ -3586,7 +3597,7 @@ class TestNameConstraintsExtension(object):
             True,
         )
 
-        cert = builder.sign(private_key, hashes.SHA1(), backend)
+        cert = builder.sign(private_key, hashes.SHA256(), backend)
         result = [
             x.value
             for x in cert.extensions.get_extension_for_class(

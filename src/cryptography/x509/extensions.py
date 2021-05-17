@@ -8,18 +8,13 @@ import datetime
 import hashlib
 import ipaddress
 import typing
-from enum import Enum
 
-from cryptography.hazmat._der import (
-    BIT_STRING,
-    DERReader,
-    OBJECT_IDENTIFIER,
-    SEQUENCE,
-)
-from cryptography.hazmat._types import _PUBLIC_KEY_TYPES
+from cryptography import utils
+from cryptography.hazmat.bindings._rust import asn1
 from cryptography.hazmat.primitives import constant_time, serialization
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+from cryptography.hazmat.primitives.asymmetric.types import PUBLIC_KEY_TYPES
 from cryptography.x509.certificate_transparency import (
     SignedCertificateTimestamp,
 )
@@ -45,7 +40,7 @@ from cryptography.x509.oid import (
 ExtensionTypeVar = typing.TypeVar("ExtensionTypeVar", bound="ExtensionType")
 
 
-def _key_identifier_from_public_key(public_key: _PUBLIC_KEY_TYPES) -> bytes:
+def _key_identifier_from_public_key(public_key: PUBLIC_KEY_TYPES) -> bytes:
     if isinstance(public_key, RSAPublicKey):
         data = public_key.public_bytes(
             serialization.Encoding.DER,
@@ -62,25 +57,7 @@ def _key_identifier_from_public_key(public_key: _PUBLIC_KEY_TYPES) -> bytes:
             serialization.Encoding.DER,
             serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-
-        reader = DERReader(serialized)
-        with reader.read_single_element(SEQUENCE) as public_key_info:
-            algorithm = public_key_info.read_element(SEQUENCE)
-            public_key_data = public_key_info.read_element(BIT_STRING)
-
-        # Double-check the algorithm structure.
-        with algorithm:
-            algorithm.read_element(OBJECT_IDENTIFIER)
-            if not algorithm.is_empty():
-                # Skip the optional parameters field.
-                algorithm.read_any_element()
-
-        # BIT STRING contents begin with the number of padding bytes added. It
-        # must be zero for SubjectPublicKeyInfo structures.
-        if public_key_data.read_byte() != 0:
-            raise ValueError("Invalid public key encoding")
-
-        data = public_key_data.data
+        data = asn1.parse_spki_for_data(serialized)
 
     return hashlib.sha1(data).digest()
 
@@ -130,8 +107,8 @@ class Extensions(object):
         raise ExtensionNotFound("No {} extension was found".format(oid), oid)
 
     def get_extension_for_class(
-        self, extclass: typing.Type[ExtensionType]
-    ) -> "Extension[ExtensionType]":
+        self, extclass: typing.Type[ExtensionTypeVar]
+    ) -> "Extension[ExtensionTypeVar]":
         if extclass is UnrecognizedExtension:
             raise TypeError(
                 "UnrecognizedExtension can't be used with "
@@ -220,7 +197,7 @@ class AuthorityKeyIdentifier(ExtensionType):
 
     @classmethod
     def from_issuer_public_key(
-        cls, public_key: _PUBLIC_KEY_TYPES
+        cls, public_key: PUBLIC_KEY_TYPES
     ) -> "AuthorityKeyIdentifier":
         digest = _key_identifier_from_public_key(public_key)
         return cls(
@@ -293,7 +270,7 @@ class SubjectKeyIdentifier(ExtensionType):
 
     @classmethod
     def from_public_key(
-        cls, public_key: _PUBLIC_KEY_TYPES
+        cls, public_key: PUBLIC_KEY_TYPES
     ) -> "SubjectKeyIdentifier":
         return cls(_key_identifier_from_public_key(public_key))
 
@@ -694,7 +671,7 @@ class DistributionPoint(object):
         return self._crl_issuer
 
 
-class ReasonFlags(Enum):
+class ReasonFlags(utils.Enum):
     unspecified = "unspecified"
     key_compromise = "keyCompromise"
     ca_compromise = "cACompromise"
@@ -1058,7 +1035,7 @@ class TLSFeature(ExtensionType):
         return hash(tuple(self._features))
 
 
-class TLSFeatureType(Enum):
+class TLSFeatureType(utils.Enum):
     # status_request is defined in RFC 6066 and is used for what is commonly
     # called OCSP Must-Staple when present in the TLS Feature extension in an
     # X.509 certificate.
