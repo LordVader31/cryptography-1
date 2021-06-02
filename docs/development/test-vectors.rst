@@ -553,6 +553,12 @@ Custom X.509 OCSP Test Vectors
   extension.
 * ``x509/ocsp/req-ext-unknown-oid.der`` - An OCSP request containing an
   extension with an unknown OID.
+* ``x509/ocsp/req-duplicate-ext.der`` - An OCSP request with duplicate
+  extensions.
+* ``x509/ocsp/resp-unknown-extension.der`` - An OCSP response containing an
+  extension with an unknown OID.
+* ``x509/ocsp/resp-unknown-hash-alg.der`` - AN OCSP response containing an
+  invalid hash algorithm OID.
 
 Custom PKCS12 Test Vectors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

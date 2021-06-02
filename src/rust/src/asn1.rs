@@ -5,7 +5,7 @@
 use pyo3::class::basic::CompareOp;
 use pyo3::conversion::ToPyObject;
 
-enum PyAsn1Error {
+pub(crate) enum PyAsn1Error {
     Asn1(asn1::ParseError),
     Py(pyo3::PyErr),
 }
@@ -50,34 +50,9 @@ fn encode_tls_feature(py: pyo3::Python<'_>, ext: &pyo3::PyAny) -> pyo3::PyResult
 }
 
 #[pyo3::prelude::pyfunction]
-fn parse_tls_feature(py: pyo3::Python<'_>, data: &[u8]) -> Result<pyo3::PyObject, PyAsn1Error> {
-    let tls_feature_type_to_enum = py
-        .import("cryptography.x509.extensions")?
-        .getattr("_TLS_FEATURE_TYPE_TO_ENUM")?;
-
-    let features = pyo3::types::PyList::empty(py);
-    for el in asn1::parse_single::<asn1::SequenceOf<u64>>(data)? {
-        let feature = el?;
-        let py_feature = tls_feature_type_to_enum.get_item(feature.to_object(py))?;
-        features.append(py_feature)?;
-    }
-
-    let x509_module = py.import("cryptography.x509")?;
-    Ok(x509_module.call1("TLSFeature", (features,))?.to_object(py))
-}
-
-#[pyo3::prelude::pyfunction]
 fn encode_precert_poison(py: pyo3::Python<'_>, _ext: &pyo3::PyAny) -> pyo3::PyObject {
     let result = asn1::write_single(&());
     pyo3::types::PyBytes::new(py, &result).to_object(py)
-}
-
-#[pyo3::prelude::pyfunction]
-fn parse_precert_poison(py: pyo3::Python<'_>, data: &[u8]) -> Result<pyo3::PyObject, PyAsn1Error> {
-    asn1::parse_single::<()>(data)?;
-
-    let x509_module = py.import("cryptography.x509")?;
-    Ok(x509_module.call0("PrecertPoison")?.to_object(py))
 }
 
 #[derive(asn1::Asn1Read)]
@@ -102,44 +77,13 @@ fn parse_spki_for_data(py: pyo3::Python<'_>, data: &[u8]) -> Result<pyo3::PyObje
     Ok(pyo3::types::PyBytes::new(py, spki.data.as_bytes()).to_object(py))
 }
 
-lazy_static::lazy_static! {
-    static ref NONCE_OID: asn1::ObjectIdentifier<'static> = asn1::ObjectIdentifier::from_string("1.3.6.1.5.5.7.48.1.2").unwrap();
-}
-
-#[pyo3::prelude::pyfunction]
-fn parse_ocsp_req_extension(
-    py: pyo3::Python<'_>,
-    der_oid: &[u8],
-    ext_data: &[u8],
-) -> pyo3::PyResult<pyo3::PyObject> {
-    let oid = asn1::ObjectIdentifier::from_der(der_oid).unwrap();
-
-    let x509_module = py.import("cryptography.x509")?;
-    if oid == *NONCE_OID {
-        // This is a disaster. RFC 2560 says that the contents of the nonce is
-        // just the raw extension value. This is nonsense, since they're always
-        // supposed to be ASN.1 TLVs. RFC 6960 correctly specifies that the
-        // nonce is an OCTET STRING, and so you should unwrap the TLV to get
-        // the nonce. For now we just implement the old behavior, even though
-        // it's deranged.
-        Ok(x509_module
-            .call_method1("OCSPNonce", (ext_data,))?
-            .to_object(py))
-    } else {
-        let oid_obj = x509_module.call_method1("ObjectIdentifier", (oid.to_string(),))?;
-        Ok(x509_module
-            .call_method1("UnrecognizedExtension", (oid_obj, ext_data))?
-            .to_object(py))
-    }
-}
-
 #[derive(asn1::Asn1Read, asn1::Asn1Write)]
 struct DssSignature<'a> {
     r: asn1::BigUint<'a>,
     s: asn1::BigUint<'a>,
 }
 
-fn big_asn1_uint_to_py<'p>(
+pub(crate) fn big_asn1_uint_to_py<'p>(
     py: pyo3::Python<'p>,
     v: asn1::BigUint,
 ) -> pyo3::PyResult<&'p pyo3::PyAny> {
@@ -246,7 +190,7 @@ struct Validity<'a> {
 fn parse_name_value_tags(rdns: &mut Name<'_>) -> Result<Vec<u8>, PyAsn1Error> {
     let mut tags = vec![];
     for rdn in rdns {
-        let mut attributes = rdn?.collect::<asn1::ParseResult<Vec<_>>>()?;
+        let mut attributes = rdn.collect::<Vec<_>>();
         assert_eq!(attributes.len(), 1);
 
         tags.push(attributes.pop().unwrap().value.tag());
@@ -269,12 +213,8 @@ fn test_parse_certificate(data: &[u8]) -> Result<TestCertificate, PyAsn1Error> {
 pub(crate) fn create_submodule(py: pyo3::Python) -> pyo3::PyResult<&pyo3::prelude::PyModule> {
     let submod = pyo3::prelude::PyModule::new(py, "asn1")?;
     submod.add_wrapped(pyo3::wrap_pyfunction!(encode_tls_feature))?;
-    submod.add_wrapped(pyo3::wrap_pyfunction!(parse_tls_feature))?;
     submod.add_wrapped(pyo3::wrap_pyfunction!(encode_precert_poison))?;
-    submod.add_wrapped(pyo3::wrap_pyfunction!(parse_precert_poison))?;
     submod.add_wrapped(pyo3::wrap_pyfunction!(parse_spki_for_data))?;
-
-    submod.add_wrapped(pyo3::wrap_pyfunction!(parse_ocsp_req_extension))?;
 
     submod.add_wrapped(pyo3::wrap_pyfunction!(decode_dss_signature))?;
     submod.add_wrapped(pyo3::wrap_pyfunction!(encode_dss_signature))?;

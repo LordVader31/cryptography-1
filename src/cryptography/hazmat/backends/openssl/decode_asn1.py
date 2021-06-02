@@ -8,13 +8,11 @@ import ipaddress
 import typing
 
 from cryptography import x509
-from cryptography.hazmat.bindings._rust import asn1
 from cryptography.x509.name import _ASN1_TYPE_TO_ENUM
 from cryptography.x509.oid import (
     CRLEntryExtensionOID,
     CertificatePoliciesOID,
     ExtensionOID,
-    OCSPExtensionOID,
 )
 
 
@@ -161,27 +159,10 @@ def _decode_general_name(backend, gn):
         )
 
 
-def _decode_ocsp_no_check(backend, ext):
-    return x509.OCSPNoCheck()
-
-
-def _decode_crl_number(backend, ext):
-    asn1_int = backend._ffi.cast("ASN1_INTEGER *", ext)
-    asn1_int = backend._ffi.gc(asn1_int, backend._lib.ASN1_INTEGER_free)
-    return x509.CRLNumber(_asn1_integer_to_int(backend, asn1_int))
-
-
-def _decode_delta_crl_indicator(backend, ext):
-    asn1_int = backend._ffi.cast("ASN1_INTEGER *", ext)
-    asn1_int = backend._ffi.gc(asn1_int, backend._lib.ASN1_INTEGER_free)
-    return x509.DeltaCRLIndicator(_asn1_integer_to_int(backend, asn1_int))
-
-
 class _X509ExtensionParser(object):
     def __init__(
-        self, backend, ext_count, get_ext, handlers=None, rust_callback=None
+        self, backend, ext_count, get_ext, rust_callback, handlers={}
     ):
-        assert handlers or rust_callback
         self.ext_count = ext_count
         self.get_ext = get_ext
         self.handlers = handlers
@@ -207,42 +188,22 @@ class _X509ExtensionParser(object):
                     "Duplicate {} extension found".format(oid), oid
                 )
 
-            if self.rust_callback is not None:
-                oid_ptr = self._backend._lib.X509_EXTENSION_get_object(ext)
-                oid_der_bytes = self._backend._ffi.buffer(
-                    self._backend._lib.Cryptography_OBJ_get0_data(oid_ptr),
-                    self._backend._lib.Cryptography_OBJ_length(oid_ptr),
-                )[:]
-                data = self._backend._lib.X509_EXTENSION_get_data(ext)
-                data_bytes = _asn1_string_to_bytes(self._backend, data)
-                ext = self.rust_callback(oid_der_bytes, data_bytes)
-                extensions.append(x509.Extension(oid, critical, ext))
+            # Try to parse this with the rust callback first
+            oid_ptr = self._backend._lib.X509_EXTENSION_get_object(ext)
+            oid_der_bytes = self._backend._ffi.buffer(
+                self._backend._lib.Cryptography_OBJ_get0_data(oid_ptr),
+                self._backend._lib.Cryptography_OBJ_length(oid_ptr),
+            )[:]
+            data = self._backend._lib.X509_EXTENSION_get_data(ext)
+            data_bytes = _asn1_string_to_bytes(self._backend, data)
+            ext_obj = self.rust_callback(oid_der_bytes, data_bytes)
+            if ext_obj is not None:
+                extensions.append(x509.Extension(oid, critical, ext_obj))
                 seen_oids.add(oid)
                 continue
 
-            # These OIDs are only supported in OpenSSL 1.1.0+ but we want
-            # to support them in all versions of OpenSSL so we decode them
-            # ourselves.
-            if oid == ExtensionOID.TLS_FEATURE:
-                # The extension contents are a SEQUENCE OF INTEGERs.
-                data = self._backend._lib.X509_EXTENSION_get_data(ext)
-                data_bytes = _asn1_string_to_bytes(self._backend, data)
-                tls_feature = asn1.parse_tls_feature(data_bytes)
-
-                extensions.append(x509.Extension(oid, critical, tls_feature))
-                seen_oids.add(oid)
-                continue
-            elif oid == ExtensionOID.PRECERT_POISON:
-                data = self._backend._lib.X509_EXTENSION_get_data(ext)
-                data_bytes = _asn1_string_to_bytes(self._backend, data)
-                precert_poison = asn1.parse_precert_poison(data_bytes)
-
-                extensions.append(
-                    x509.Extension(oid, critical, precert_poison)
-                )
-                seen_oids.add(oid)
-                continue
-
+            # Fallback to our older parsing because the rust code doesn't
+            # know how to parse this.
             try:
                 handler = self.handlers[oid]
             except KeyError:
@@ -326,32 +287,6 @@ def _decode_user_notice(backend, un):
     return x509.UserNotice(notice_reference, explicit_text)
 
 
-def _decode_basic_constraints(backend, bc_st):
-    basic_constraints = backend._ffi.cast("BASIC_CONSTRAINTS *", bc_st)
-    basic_constraints = backend._ffi.gc(
-        basic_constraints, backend._lib.BASIC_CONSTRAINTS_free
-    )
-    # The byte representation of an ASN.1 boolean true is \xff. OpenSSL
-    # chooses to just map this to its ordinal value, so true is 255 and
-    # false is 0.
-    ca = basic_constraints.ca == 255
-    path_length = _asn1_integer_to_int_or_none(
-        backend, basic_constraints.pathlen
-    )
-
-    return x509.BasicConstraints(ca, path_length)
-
-
-def _decode_subject_key_identifier(backend, asn1_string):
-    asn1_string = backend._ffi.cast("ASN1_OCTET_STRING *", asn1_string)
-    asn1_string = backend._ffi.gc(
-        asn1_string, backend._lib.ASN1_OCTET_STRING_free
-    )
-    return x509.SubjectKeyIdentifier(
-        backend._ffi.buffer(asn1_string.data, asn1_string.length)[:]
-    )
-
-
 def _decode_authority_key_identifier(backend, akid):
     akid = backend._ffi.cast("AUTHORITY_KEYID *", akid)
     akid = backend._ffi.gc(akid, backend._lib.AUTHORITY_KEYID_free)
@@ -407,32 +342,6 @@ def _decode_authority_information_access(backend, aia):
 def _decode_subject_information_access(backend, aia):
     access_descriptions = _decode_information_access(backend, aia)
     return x509.SubjectInformationAccess(access_descriptions)
-
-
-def _decode_key_usage(backend, bit_string):
-    bit_string = backend._ffi.cast("ASN1_BIT_STRING *", bit_string)
-    bit_string = backend._ffi.gc(bit_string, backend._lib.ASN1_BIT_STRING_free)
-    get_bit = backend._lib.ASN1_BIT_STRING_get_bit
-    digital_signature = get_bit(bit_string, 0) == 1
-    content_commitment = get_bit(bit_string, 1) == 1
-    key_encipherment = get_bit(bit_string, 2) == 1
-    data_encipherment = get_bit(bit_string, 3) == 1
-    key_agreement = get_bit(bit_string, 4) == 1
-    key_cert_sign = get_bit(bit_string, 5) == 1
-    crl_sign = get_bit(bit_string, 6) == 1
-    encipher_only = get_bit(bit_string, 7) == 1
-    decipher_only = get_bit(bit_string, 8) == 1
-    return x509.KeyUsage(
-        digital_signature,
-        content_commitment,
-        key_encipherment,
-        data_encipherment,
-        key_agreement,
-        key_cert_sign,
-        crl_sign,
-        encipher_only,
-        decipher_only,
-    )
 
 
 def _decode_general_names_extension(backend, gns):
@@ -523,21 +432,6 @@ def _decode_policy_constraints(backend, pc):
     return x509.PolicyConstraints(
         require_explicit_policy, inhibit_policy_mapping
     )
-
-
-def _decode_extended_key_usage(backend, sk):
-    sk = backend._ffi.cast("Cryptography_STACK_OF_ASN1_OBJECT *", sk)
-    sk = backend._ffi.gc(sk, backend._lib.sk_ASN1_OBJECT_free)
-    num = backend._lib.sk_ASN1_OBJECT_num(sk)
-    ekus = []
-
-    for i in range(num):
-        obj = backend._lib.sk_ASN1_OBJECT_value(sk, i)
-        backend.openssl_assert(obj != backend._ffi.NULL)
-        oid = x509.ObjectIdentifier(_obj2txt(backend, obj))
-        ekus.append(oid)
-
-    return x509.ExtendedKeyUsage(ekus)
 
 
 _DISTPOINT_TYPE_FULLNAME = 0
@@ -645,13 +539,6 @@ def _decode_freshest_crl(backend, cdps):
     return x509.FreshestCRL(dist_points)
 
 
-def _decode_inhibit_any_policy(backend, asn1_int):
-    asn1_int = backend._ffi.cast("ASN1_INTEGER *", asn1_int)
-    asn1_int = backend._ffi.gc(asn1_int, backend._lib.ASN1_INTEGER_free)
-    skip_certs = _asn1_integer_to_int(backend, asn1_int)
-    return x509.InhibitAnyPolicy(skip_certs)
-
-
 def _decode_scts(backend, asn1_scts):
     from cryptography.hazmat.backends.openssl.x509 import (
         _SignedCertificateTimestamp,
@@ -716,17 +603,6 @@ _CRL_ENTRY_REASON_ENUM_TO_CODE = {
     x509.ReasonFlags.privilege_withdrawn: 9,
     x509.ReasonFlags.aa_compromise: 10,
 }
-
-
-def _decode_crl_reason(backend, enum):
-    enum = backend._ffi.cast("ASN1_ENUMERATED *", enum)
-    enum = backend._ffi.gc(enum, backend._lib.ASN1_ENUMERATED_free)
-    code = backend._lib.ASN1_ENUMERATED_get(enum)
-
-    try:
-        return x509.CRLReason(_CRL_ENTRY_REASON_CODE_TO_ENUM[code])
-    except KeyError:
-        raise ValueError("Unsupported reason code: {}".format(code))
 
 
 def _decode_invalidity_date(backend, inv_date):
@@ -819,18 +695,8 @@ def _parse_asn1_generalized_time(backend, generalized_time):
     return datetime.datetime.strptime(time, "%Y%m%d%H%M%SZ")
 
 
-def _decode_nonce(backend, nonce):
-    nonce = backend._ffi.cast("ASN1_OCTET_STRING *", nonce)
-    nonce = backend._ffi.gc(nonce, backend._lib.ASN1_OCTET_STRING_free)
-    return x509.OCSPNonce(_asn1_string_to_bytes(backend, nonce))
-
-
 _EXTENSION_HANDLERS_BASE = {
-    ExtensionOID.BASIC_CONSTRAINTS: _decode_basic_constraints,
-    ExtensionOID.SUBJECT_KEY_IDENTIFIER: _decode_subject_key_identifier,
-    ExtensionOID.KEY_USAGE: _decode_key_usage,
     ExtensionOID.SUBJECT_ALTERNATIVE_NAME: _decode_subject_alt_name,
-    ExtensionOID.EXTENDED_KEY_USAGE: _decode_extended_key_usage,
     ExtensionOID.AUTHORITY_KEY_IDENTIFIER: _decode_authority_key_identifier,
     ExtensionOID.AUTHORITY_INFORMATION_ACCESS: (
         _decode_authority_information_access
@@ -841,8 +707,6 @@ _EXTENSION_HANDLERS_BASE = {
     ExtensionOID.CERTIFICATE_POLICIES: _decode_certificate_policies,
     ExtensionOID.CRL_DISTRIBUTION_POINTS: _decode_crl_distribution_points,
     ExtensionOID.FRESHEST_CRL: _decode_freshest_crl,
-    ExtensionOID.OCSP_NO_CHECK: _decode_ocsp_no_check,
-    ExtensionOID.INHIBIT_ANY_POLICY: _decode_inhibit_any_policy,
     ExtensionOID.ISSUER_ALTERNATIVE_NAME: _decode_issuer_alt_name,
     ExtensionOID.NAME_CONSTRAINTS: _decode_name_constraints,
     ExtensionOID.POLICY_CONSTRAINTS: _decode_policy_constraints,
@@ -854,14 +718,11 @@ _EXTENSION_HANDLERS_SCT = {
 }
 
 _REVOKED_EXTENSION_HANDLERS = {
-    CRLEntryExtensionOID.CRL_REASON: _decode_crl_reason,
     CRLEntryExtensionOID.INVALIDITY_DATE: _decode_invalidity_date,
     CRLEntryExtensionOID.CERTIFICATE_ISSUER: _decode_cert_issuer,
 }
 
 _CRL_EXTENSION_HANDLERS = {
-    ExtensionOID.CRL_NUMBER: _decode_crl_number,
-    ExtensionOID.DELTA_CRL_INDICATOR: _decode_delta_crl_indicator,
     ExtensionOID.AUTHORITY_KEY_IDENTIFIER: _decode_authority_key_identifier,
     ExtensionOID.ISSUER_ALTERNATIVE_NAME: _decode_issuer_alt_name,
     ExtensionOID.AUTHORITY_INFORMATION_ACCESS: (
@@ -869,10 +730,6 @@ _CRL_EXTENSION_HANDLERS = {
     ),
     ExtensionOID.ISSUING_DISTRIBUTION_POINT: _decode_issuing_dist_point,
     ExtensionOID.FRESHEST_CRL: _decode_freshest_crl,
-}
-
-_OCSP_BASICRESP_EXTENSION_HANDLERS = {
-    OCSPExtensionOID.NONCE: _decode_nonce,
 }
 
 _OCSP_SINGLERESP_EXTENSION_HANDLERS_SCT = {

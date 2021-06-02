@@ -119,6 +119,14 @@ class TestOCSPRequest(object):
             b"\x04\x10{\x80Z\x1d7&\xb8\xb8OH\xd2\xf8\xbf\xd7-\xfd",
         )
 
+    def test_load_request_with_duplicate_extension(self):
+        req = _load_data(
+            os.path.join("x509", "ocsp", "req-duplicate-ext.der"),
+            ocsp.load_der_ocsp_request,
+        )
+        with pytest.raises(x509.DuplicateExtension):
+            req.extensions
+
     def test_load_request_two_requests(self):
         with pytest.raises(NotImplementedError):
             _load_data(
@@ -968,6 +976,14 @@ class TestOCSPResponse(object):
         with pytest.raises(UnsupportedAlgorithm):
             resp.signature_hash_algorithm
 
+    def test_unknown_hash_algorithm(self):
+        resp = _load_data(
+            os.path.join("x509", "ocsp", "resp-unknown-hash-alg.der"),
+            ocsp.load_der_ocsp_response,
+        )
+        with pytest.raises(UnsupportedAlgorithm):
+            resp.hash_algorithm
+
     def test_load_responder_key_hash(self):
         resp = _load_data(
             os.path.join("x509", "ocsp", "resp-responder-key-hash.der"),
@@ -1003,6 +1019,19 @@ class TestOCSPResponse(object):
         assert ext.critical is False
         assert ext.value == x509.OCSPNonce(
             b'\x04\x105\x957\x9fa\x03\x83\x87\x89rW\x8f\xae\x99\xf7"'
+        )
+
+    def test_response_unknown_extension(self):
+        resp = _load_data(
+            os.path.join("x509", "ocsp", "resp-unknown-extension.der"),
+            ocsp.load_der_ocsp_response,
+        )
+        assert len(resp.extensions) == 1
+        ext = resp.extensions[0]
+        assert ext.critical is False
+        assert ext.value == x509.UnrecognizedExtension(
+            x509.ObjectIdentifier("1.3.6.1.5.5.7.48.1.2.200"),
+            b'\x04\x105\x957\x9fa\x03\x83\x87\x89rW\x8f\xae\x99\xf7"',
         )
 
     def test_serialize_reponse(self):
